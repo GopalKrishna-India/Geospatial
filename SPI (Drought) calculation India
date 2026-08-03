@@ -1,0 +1,84 @@
+// 1. Define the spatial region of interest (India)
+var countries = ee.FeatureCollection("USDOS/LSI/2017/LargeScaleInternationalBoundaries");
+var india = countries.filter(ee.Filter.eq('country_na', 'India'));
+Map.centerObject(india, 5);
+
+// 2. Define temporal limits (20-year span)
+var startYear = 2006;
+var endYear = 2026;
+var years = ee.List.sequence(startYear, endYear);
+
+// 3. Load CHIRPS Precipitation Dataset
+var chirps = ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
+  .filterDate(startYear + '-01-01', (endYear + 1) + '-01-01')
+  .select('precipitation');
+
+// 4. Calculate Annual Total Rainfall for each year
+var annualPrecipCollection = ee.ImageCollection(years.map(function(year) {
+  var yearStart = ee.Date.fromYMD(year, 1, 1);
+  var yearEnd = ee.Date.fromYMD(year, 12, 31);
+  
+  var annualSum = chirps.filterDate(yearStart, yearEnd)
+                        .sum()
+                        .clip(india);
+                        
+  return annualSum.set('year', year)
+                  .set('system:time_start', yearStart.millis());
+}));
+
+// 5. Compute historical mean and standard deviation over the 20-year period
+var meanPrecip = annualPrecipCollection.mean();
+var stdPrecip = annualPrecipCollection.reduce(ee.Reducer.stdDev());
+
+// 6. Calculate the Standardized Precipitation Index (SPI-12) for each year
+var spiCollection = annualPrecipCollection.map(function(img) {
+  var year = img.get('year');
+  // Formula: (Current Year Rainfall - 20Yr Mean) / 20Yr StdDev
+  var spi = img.subtract(meanPrecip).divide(stdPrecip).rename('SPI');
+  
+  return spi.set('year', year)
+            .set('system:time_start', img.get('system:time_start'));
+});
+
+// 7. Extract a specific year to visualize (e.g., 2025)
+var targetYear = 2025;
+var spiTarget = spiCollection.filter(ee.Filter.eq('year', targetYear)).first();
+
+// 8. Load Landsat 8/9 to visually verify impact on the ground for that year
+var landsatCol = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+  .filterBounds(india)
+  .filterDate(targetYear + '-10-01', targetYear + '-12-31') // Post-monsoon vegetation
+  .filter(ee.Filter.lt('CLOUD_COVER', 15))
+  .median()
+  .clip(india);
+
+// Scale Landsat optical bands (SR factor adjustment)
+var landsatTrueColor = landsatCol.select(['SR_B4', 'SR_B3', 'SR_B2']).multiply(0.0000275).add(-0.2);
+
+// 9. Add Layers to the Map Layout
+// Standard SPI classification limits range from -2.0 (Extreme Drought) to +2.0 (Extremely Wet)
+var spiVis = {
+  min: -2.0,
+  max: 2.0,
+  palette: ['#8b0000', '#ff4500', '#ffa500', '#ffff00', '#ffffff', '#00ff00', '#0000ff']
+};
+
+Map.addLayer(landsatTrueColor, {min: 0, max: 0.3}, 'Landsat True Color ' + targetYear, false);
+Map.addLayer(spiTarget, spiVis, 'SPI-12 India (' + targetYear + ')');
+
+// 10. Generate a long-term Chart for an interactive point assessment
+var samplePoint = ee.Geometry.Point([77.2, 28.6]); // Default point: near New Delhi
+Map.addLayer(samplePoint, {color: 'purple'}, 'Sample Chart Location');
+
+print(ui.Chart.image.series({
+  imageCollection: spiCollection,
+  region: samplePoint,
+  reducer: ee.Reducer.mean(),
+  scale: 5000,
+  xProperty: 'year'
+}).setOptions({
+  title: '20-Year SPI Trend at Sample Point',
+  vAxis: {title: 'SPI Value'},
+  hAxis: {title: 'Year', format: '####'},
+  series: {0: {color: 'blue', lineWidth: 2}}
+}));
